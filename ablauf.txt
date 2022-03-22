@@ -1,0 +1,525 @@
+FRAGEN:
+circuit <-> connection: circuit is added to connection ?!
+
+
+#######################################################################################
+#######################################################################################
+#######################################################################################
+
+tor-example.cc:
+* Create PseudoClientSocket:
+	- int m_leftToRead, m_leftToSend = 0
+	- void ttlbCallback, ttfbCallback, recvCallback = 0
+	- Ptr<RandomVariableStream> m_thinkTimeStream, m_requestSizeStream = m_bulkThink, m_bulkRequest
+		= Random number generator => Wahrscheinlichkeitsverteilung, dass Anfragen gestellt werden
+	- schedule RequestPage at given startTime:
+		* RequestPage: 
+			- ScheduleNow NotifyDataRecv (Callback von Socket class) => notify through callback about received data at socket
+				* calls Callback m_receivedData on this
+			- provides bytes at server == request to server
+	==> RequestPage is scheduled at startTime and will be triggered then and will then trigger a request of the client to the server which will trigger bytes to be sent
+
+* th.AddCircuit(1,"entry1","btlnk","exit1", PseudoClientSocket):
+	- create CircuitDescriptor:
+		* set id, path[0-3] = proxy - exit, clientSocket
+		* add to map<int, CircuitDescriptor> m_circuits & vector circuitIds
+
+	- AddRelay (for proxy, ..., exit):
+		* create RelayDescriptor: spokeId, tapp, tapp->nodeName
+		=> tapp = CreateTorApp():
+			- tapp = m_factory.Create<TorBaseApp>()
+			=> m_factory = ObjectFactory & m_factory.SetTypeId ("ns3::TorApp") when initializing tor-starhelper
+			=> tapp == TorApp
+		* add to map<string, RelayDescriptor>
+		* add to <ApplicationContainer> m_relayApps
+	==> created circuits and initialized TorApps in ApplicationContainer of relays
+
+* th.BuildTopology:
+	- add random delay factor 
+	- create PointToPointStarHelper m_starHelper
+	- install internet stack (w/ InternetStackHelper) on center node (m_starHelper->GetHub ()) & spokes nodes (m_starHelper->GetSpokeNode (i))
+	- set addresses (& enable Pcap tracing ) & populate routingTables
+
+	- th.InstallCircuits():
+		* for every circuit: App = InstallTorApp( relay ) on every relay 
+					(???WHY DO I HAVE TO DO THIS? AND IT'S NOT ENOUGH TO HAVE THE CREATED APP???) => mit relay verknüpfen, bei create nur objekt erstellt
+			- AddApplication( desc.tapp): associate app to node 
+				* hinterlegt App und schedule
+				* in node.cc::AddApplication(): Simulator::ScheduleWithContext (GetId (), Seconds (0.0), &Application::Initialize, application)
+				=> schedule &App::Initialize at Seconds(0.0)
+					- that calls the virtual DoInitialize on all aggregated objects ( it will be called only once! ), Initialize can be called multiple times
+		* create specific addresses (entryAddress, ...)
+
+		* TorApp::AddCircuit for every app on relay:
+			- (e.id, serverAddress, SERVEREDGE, middleAddress, RELAYEDGE)
+			- TorBaseApp::AddCircuit: ensures valid connection type
+
+			=> setup connection with previous and next relay: e.g. server -> exit -> middle => p_ip = server (previous), n_ip = n_ip (next)
+					??? WHY IS IT SOLVED LIKE THIS??? FOR BIDIRECTIONALITY ??? => read & write callback "gleichzeitig", lesen von einer, schreiben bei anderer (conn nur hop-by-hop)
+
+			- TorApp::AddConnection(ip, conntype):
+				* Create<Connection>: set torapp; remote (= ip); conntype; inbuf.size & outbuf.size & reading_blocked & active_circuits & m_socket = 0
+				* get connection with corresponding ip address or create new connection for node with this address if none exists until then
+				* add a connection to the list of managed connections (vector<Ptr<Connection> > connections.push_back(conn))
+			
+			- set client socket (m_socket) of the predecessor connection (p_conn), if one was given (default is 0)
+			- Callback to trigger after a new socket is established (m_triggerNewSocket) 
+						??? WHY DO I NEED THIS ??? => kann vo naußerhalb gesetzt werden => zb verwenden um zeit zu messen, ip adressen zu merken
+			- create Ptr<Circuit> circ with id, n_conn, p_conn, m_windowStart, m_windowIncrement (defined in tor.cc): 
+						??? WHERE IS M_WINDOWSTART SET THE FIRST TIME? in tor.cc => AddAttribute, aufgerufen von CreateObject (eigene Art von ns3 => userguide (objektorientierung))
+				* set p_cellQ, n_cellQ = queue<Ptr<Packet> >
+				* set m_windowStart, m_windowIncrement, deliver_window, package_window, p_conn, n_conn, next_active_on_n_conn, next_active_on_p_conn
+			
+			- TorApp::AddActiveCircuits(conn, circ):
+				* no active circuits for this connection:
+					- add circ to active circuits for this connection ( conn->active_circuits = circ )
+					- set circ as active previous or next attribute for this circ ( circ->SetNextCirc (conn, circ) )
+						* if n_conn == current conn then the current circ is circ->next_active_on_n_conn
+				* else (already active cirvuits):
+					- temp = conn->GetActiveCircuits ()->GetNextCirc(conn): get previous or next circ (if thisCirc->n_conn==current_conn => next_active_on_n_conn)
+					- set this temp circ as previous or next attribute of current circ (see above)
+					- set current circ as next circ of avtive_circuits of current conn
+				=> create linked ring of circs as active circuits
+					??? EXACT DIFFERENCE OF CONNECTION AND CIRCUIT??? conn ist abstraktion, echte verbindung = socket (multiplexing über eine Conn möglich, puffer: circqueue, tcp sendebuffer auf conn, der reihe nach circs abgewechselt )
+			
+			- add current circ to the global list of circuits (map<uint16_t,Ptr<Circuit> >) & baseCircuits (map<uint16_t,Ptr<BaseCircuit> >)
+		
+		* remember the theoretical hop-by-hop RTTs: 
+			- e.g. exitApp->RememberPeerDelay (middleAddress, GetHopRtt(e.exit(), e.middle())) (defined in tor-base.cc)
+				* time = GetHopRtt(from_relay, to_relay):
+					- 2*GetRelayDelay(from_relay) + 2*GetRelayDelay(to_relay)
+					- GetRelayDelay:
+						* specific link delay for this relay (found in map<string, Time> m_specificLinkDelays)
+						or general m_underlayLinkDelay = Time("20ms") (defined in TorStarHelper);
+				* RememberPeerDelay(time): map<Ipv4Address,Time> base_delays[ip] = time
+
+* get applications defined in tor-starhelper ( ApplicationContainer relays = th.GetTorAppsContainer())
+* set start time of relay Apps (== TorApps)
+	=> Arrange for all of the Applications in this container to Start() at the Time given as a parameter
+* set stop time of relay apps
+
+
+/*
+****************************************************************************************
+*/
+
+* Simulator::Run ():
+	- apps in ApplicationContainer are called (TorApps on the nodes => scheduled to start at 0.0)
+
+	- this calls TorApp::StartApplication():
+
+		* TorBaseApp::StartApplication ():
+			- get id & ip of current node
+			- create m_readbucket & m_writebucket:
+				* = TokenBucket( m_rate,m_burst,m_refilltime ) 
+						??? WHERE ARE THESE ATTRIBUTES SET ?!
+							MAYBE IN SETTYPEID OF TOR-BASE (ADDATTRIBUTE) ja (sim.cc oder beispiele in ns3)
+			- set offset time for starting buckets m_read/m_writebucket.StartBucket(offset) (offset = [0, m_refilltime])
+			=> TokenBuckets are automatically emptied (m_rate) & refilled (m_refilltime)
+
+			- TokenBucket.StartBucket(time):
+				* bucket is the size of the data that could be transmitted(?) with the burst datarate in the refilltime (double = DataRate * Time / 8)
+				* schedule Refillevent after offset time (Simulator::Schedule (offset,&TokenBucket::Refill, this))
+
+				* TokenBucket::Refill:
+					- get m_bucket size (=prev) and rate & burst that could be transmitted within refill time with the corresponding data rates
+					- add normal rate to m_bucket and reduce size to burst size if it is smaller than bucket+rate
+						=> burst is the maximum(?) that could happen in refilltime => don't make bucket larger to not flood/blow up everything
+					- call Callback m_refilled(prev_bucket) (if not null)
+						=> Callbacks are set in TorApp::StartApplication => RefillReadCallback & RefillWriteCallback
+					- reschedule Refillevent after refilltime			
+		
+		* set SetRefilledCallback for m_readbucket & m_writebucket ( &TorApp::RefillReadCallback, &TorApp::RefillWriteCallback)
+
+		* create listen socket on all relays (proxy, entry, btlnk, exit)
+			- TODO: check what happens in Socket::Create, Bind, Listen
+		* set SetAcceptCallback (TODO: MakeNullCallback???): HandleAccept
+
+		* iterate over all neighbouring connections of this node to set up:
+			- if own ip smaller than that of neighbour && conntype = RELAYEDGE => establish conn
+				* create socket, bind, connect, set recv and send callback (&TorApp::ConnReadCallback, &TorApp::ConnWriteCallback)
+				* set socket of conn & set new callback TracedCallback<Ptr<TorBaseApp> m_triggerNewSocket Callback to trigger after a new socket is established ()
+			- if ip address matches ipmask
+				* && Serveredge:
+					- create PseudoServerSocket
+					- set recv and send callback for socket s (&TorApp::ConnReadCallback, &TorApp::ConnWriteCallback)
+					- set socket of conn & set new callback TracedCallback<Ptr<TorBaseApp> m_triggerNewSocket Callback to trigger after a new socket is established ()
+					- set circId = id of active circuit
+					- call (???) TracedCallback m_triggerNewPseudoServerSocket(circId, Socket)
+
+				* && Proxyedge:
+					- get socket or create new PseudoClientSocket => m_triggerNewSocket(???)
+					- set recv and send callback for socket s (&TorApp::ConnReadCallback, &TorApp::ConnWriteCallback)
+					- set socket of conn
+				
+		* call m_triggerAppStart => this app was just started
+
+/*
+****************************************************************************************
+*/
+
+Callbacks:
+
+	RefillReadCallback:
+		* check whether read bucket was prev at least zero or below and is now bigger (==refilled)
+		* find first connection (head)
+		* m_scheduleReadHead != 0 is the next connection to read from, Previous operations did not continue because the token bucket ran empty
+			=> find this connection, headit = conn, reset m_scheduleReadHead to 0
+		* set conn to next connection to read from (conn = it = headit)
+		{
+			* scheduleRead( "10ns" ) on conn:
+				- m_socket & EventId read_event.IsExpired(): set callback when read_event timer expires
+					read_event = Simulator::Schedule (delay, &TorApp::ConnReadCallback, torapp, m_socket)
+			* set conn to next connection
+		} while not all connections have been seen (it != headit) 
+		=> ??? scheduleRead on all connections of circuit (???)
+
+	***********************************/
+
+	RefillWriteCallback:
+		* check whether write bucket was prev at least zero or below and is now bigger (==refilled)
+		* m_scheduleWriteHead != 0 is the next connection to write to, Previous operations did not continue because the token bucket ran empty
+			=> find this connection, headit = conn, reset m_scheduleReadHead to 0
+				??? DO I HAVE TOKENS FOR THE WHOLE CIRCUIT OR FOR THE CONNECTIONS? => fuer die ganze App auf dem relay, (app kann mehrere vircuits, ein circuit hat max 2 connections aber mehrere circuits können die gleiche conn nutzen) immer der reihe nach verbindungen auswählen von denen gesendet wird (round robin)
+				PROBABLY PER CIRCUIT BECAUSE OTHERWISE IT SHOULD NOT BE POSSIBLE THAT A CONNECTION IN THE MIDDLE IS THE ONE WHERE THE TRANSMISSION STOPS ???
+		* set conn to next connection to read from (conn = it = headit)
+		{
+			* scheduleWrite(): ??? NO DELAY IS PASSED => IMPLICITLY ZERO??? ja bei def in tor.h, nicht direkt aufgerufen, weil in ns3 dann alle events der reihe nach abgearbeitet werden, bei funktionsaufruf könnte es blockiern
+				- m_socket && EventId write_event.IsExpired (): schedule callback when write_event expires
+					write_event = Simulator::Schedule (delay, &TorApp::ConnWriteCallback, torapp, m_socket, m_socket->GetTxAvailable ())
+			* set conn to next connection
+		} while not all connections have been seen (it != headit) 
+		=> schdeduleWrite on all connections of circuit (???)
+
+	/***********************************/
+
+	HandleAccept ( Ptr<Socket> s, const Address& from ):
+		* set up conn and get ip address of sender
+		* find connection with corresponding ip address and set conn to it if no socket exists until then
+		* set socket of conn to s 
+		* set new callback TracedCallback<Ptr<TorBaseApp> m_triggerNewSocket Callback to trigger after a new socket is established ()
+		* set recv and send callback for socket s (&TorApp::ConnReadCallback, &TorApp::ConnWriteCallback)
+			TODO check in socket class. SetRecvCallback & SetSendCallback ???
+		* ScheduleRead & ScheduleWrite on the conn (see below)
+
+	/***********************************/
+
+	ConnReadCallback( socket ):
+		* At one of the connections, data is ready to be read. This does not mean the data has been read already, but it has arrived in the RX buffer. We
+			decide whether we want to read it or not (depending on whether the connection is blocked).
+		* lookup conn for this socket (TorApp::LookupConn):
+			- iterate over all connections and look for socket with conn->GetSocket()
+		* if conn is blocked => return
+		* else depending on conntype == RELAYEDGE => set base to CELL_NETWORK_SIZE or CELL_PAYLOAD_SIZE
+		* set max_read = TorApp::RoundRobin => decide how many bytes out of global_bucket we're willing to use for this transaction
+		* find the minimum amount of data to read safely from the socket (min ( max_read, available bytes (socket->GetRxAvailable)) )
+
+		* if m_readbucket is empty and m_scheduleReadHead is not set:
+			- set m_scheduleReadHead to current connection 
+			- if it is empty but already set => that means that other connection is already waiting?!
+
+		* adapt max_read depending on available resources of conn
+		* create vector<Ptr<Packet> > packet_list
+		* read max_read to packet_list 
+		  read_bytes = conn->Read():
+			- if reading_blocked:
+				* read nothing and return
+			- initialize data buffer for max_read and the leftover data of last transmission (uint8_t raw_data[max_read + this->inbuf.size]) (???)
+			- memcpy raw data to inbuf (amount: inbuf.size) TODO check direction of memcpy
+			- m_socket->Recv:
+				* receive specified amount of data (max_read) and write to inbuf buffer
+			- determine base depending on connection type (==RELAYEDGE?)
+			- determine how much data was received and calculate packet size
+			- determine how much data will be leftover and stay in inbuf.data
+			- slice data into packets and add to packet_list
+			- save leftover in inbuf.data
+			- return number of bytes that were received from socket
+		* while packets are in packet_list:
+		{
+			- if conn_type == RELAYEDGE:
+				* ReceiveRelayCell (conn, packet_list[i]:
+					- LookupCircuitFromCell:
+						* peek into header and find out circ (deserialize but does not remove header from buffer)
+					- find target connection for relaying (find out opposite direction and its connection)
+						DIRECTION = OPPOSITE DIRECTION
+					- CountFinalReception(circId, packet size) of target_conn:
+						* if conn_type is not RELAYEDGE and socket == PseudoClientSocket (???) (target_conn is in opposite direction, therefore, it could now be non-RELAYEDGE)
+							=> TracedCallback m_triggerBytesLeftNetwork: notify about bytes leaving the network
+							=> remember how much data was delivered for this circ
+					- AppendCellToCircuitQueue (circ, cell, direction):
+
+						* get queue of current circ in the corresponding direction (==opposite)
+						* get conn of current circ in the corresponding direction
+						* circ->PushCell( cell, direction ):
+
+							- get conn in both directions
+							- if oppconn_type is not RELAYEDGE (theoretically this would be RELAYEDGE because condition in ConnReadCallback was that conntype == RELAYEDGE
+										and opposite of opposite would always be RELAYEDGE again???):
+
+								* decrease TracedValue circ.package_window (How many relay data cells can we package (read from edge streams) 
+										on this circuit before we receive a circuit-level sendme cell asking for more?)
+								* if package_window get <= 0 ==> BLOCK CONNECTION
+
+							- if conn_type is not RELAYEDGE (should be the case?!):
+								* if cell == Sendme (peek header to find out):
+									- IncPackageWindow by m_windowIncrement (max m_windowStart)
+									- unblock conncetion if blocked before and ScheduleRead
+									- return
+								* else remove fixed length header (ns3::Packet::RemoveHeader)
+							
+							- BaseCircuit::IncrementStats (direction, read = CELL_PAYLOAD_SIZE, write = 0) (tor-base.cc):
+								* depending on direction (OUTBOUND? (=away from client)) stats_p_bytes_read or stats_n_bytes_read += read
+							- get packet queue in direction (n_cellQ or p_cellQ) and add cell to it
+						
+						* conn->ScheduleWrite()
+
+			- if conn_type != RELAYEDGE:
+				* PackageRelayCell (conn, packet_list[i]):
+					- get active circuit of conn
+					- PackageRelayCellImpl (circ->GetId (), cell):
+						* create header with corresponding attributes (circId, relay_data, relay_type, cell_size) and add to header
+					- set sending direction to opposite direction of before
+					- AppendCellToCircuitQueue (circ, cell, direction)
+						* see above!
+						* now oppconn_type could be RELAYEDGE
+					- if package_window of circ is below zero 
+						=> block connection	
+		}
+		* if read_bytes (= bytes received from socket) > 0:
+			- TorApp::GlobalBucketsDecrement: decrease m_readbucket by read_bytes
+			- if bytes are available on socket:
+				* add virtual delay (= processing time for reading bytes)
+				* conn->scheduleRead in delay
+
+	/***********************************/
+
+	ConnWriteCallback (Ptr<Socket> socket, uint32_t tx):
+		* lookup conn for this socket (TorApp::LookupConn):
+			- iterate over all connections and look for socket with conn->GetSocket()
+
+		* get number of bytes which can be sent in a single send call ( socket->GetTxAvailable () )
+		* depending on conntype == RELAYEDGE => set base to CELL_NETWORK_SIZE or CELL_PAYLOAD_SIZE
+		* set max_write = TorApp::RoundRobin => decide how many bytes out of global_bucket we're willing to use for this transaction
+		* if m_writebucket is empty and m_scheduleWriteHead is not set:
+			- set m_scheduleWriteHead to current connection
+
+		* if max_write < 0: do nothing and return
+		* written_bytes = conn->Write (max_write):
+			- determine base * initialize raw_data buffer
+			- TODO check direction of memcpy
+			- memcpy (raw_data, outbuf.data, outbuf.size), datasize = outbuf_size
+			- set start_circ to first active circuit
+			- initialize circ, cell, direction
+
+			- while (datasize < max_write)
+			{
+				* get active circuit circ and its direction
+				* get cell = circ->PopCell (direction):
+					- depending on direction == OUTBOUND? get cell from circ::n_cellQ (true) or circ::p_cellQ
+					- if cell is not SendMe: IncrementStats(direction, 0, CELL_PAYLOAD_SIZE):
+						* depending on direction (== OUTBOUND?) stats_p_bytes_write or stats_n_bytes_write += CELL_PAYLOAD_SIZE
+
+					- get connection in direction
+					- if conn is not RELAYEDGE:
+						* decrease TracedValue deliver_window ( How many relay data cells will we deliver (write to edge streams) on this circuit? 
+									When deliver_window gets low, we send some circuit-level sendme cells to indicate that we're willing to accept more???)
+						* if deliver_window <= m_windowStart - m_windowIncrement:
+							- IncPackageWindow by m_windowIncrement (max m_windowStart)
+							- CreateSendme cell (set header attributes, packet with CELL_PAYLOAD_SIZE and add header to packet)
+							- get base circuit queue in opposite direction and add this sendme cell
+							- ScheduleWrite in this direction
+							=> /* handle sending sendme cells here (instead of in PushCell) because otherwise short circuits could have more 
+									than a window-ful of cells in-flight. Regular circuits will not be affected by this. */
+				* if cell:
+					- cellsize = copy packet data to buffer (cell->CopyData)
+					- ??? check if just packaged ??? WHY, WHERE? wenn direkt von pseudo client / server => ncoh reine daten, keine cell
+					- get opp_con and if it is (not RELAYEDGE && PseudoServerSocket): notify about bytes entering network
+					- increase number of written bytes: datasize += cellsize
+					- remember index of data was delivered for this circ
+
+				* set active circ to the next circ on this connection (circ->GetNextCirc (this))
+				* if active circ (GetActiveCircuits()) is the start_circ:
+					- if I wrote nothing (!flushed_some) => BREAK
+					- if I wrote something: reset flushed_some=false and continue until max_write is reached
+			}
+			- update max_write to min of max_write and datasize (actually available data)
+			- written_bytes = m_socket->Send(raw_data, max_write, 0):
+				* send specified amount of data (max_write) to remote host (???), raw_data = buffer to read from
+				=> WE DETERMINED MAX_WRITE AS NUMBER OF BYTES THAT WE WANT TO USE MAXIMALLY -> THAT MIGHT BE LESS THAN OR WHOLE RAW_DATA BUFFER
+			- remember leftover (datasize - written_bytes)
+			- update outbuf.data
+			- return number Of written_bytes
+
+		* if written_bytes (= bytes sent to socket) > 0:
+			- TorApp::GlobalBucketsDecrement: decrease m_writtenbucket by written_bytes
+			- conn->scheduleWrite
+
+
+				
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#######################################################################################	
+#######################################################################################
+#######################################################################################
+
+tor-example:
+	* create tor-starhelper th:
+		- set attributes (delay etc), App: Tor (vanilla), m_factory.SetTypeId ("ns3::TorApp")
+		- m_factory is ObjectFactory (creates TorApp later, class can also hold a set of attributes to set automatically during the object construction)
+		
+	* create PseudoClientSocket:
+		- (Ptr<RandomVariableStream> requestStream, Ptr<RandomVariableStream> thinkStream, Time startTime)
+		- set ttlbCallback, ttfbCallback, recvCallback
+START:		- m_startEvent = schedule(startTime) RequestPage:
+			* update m_leftToSend
+			* schedule(now) Socket::NOTIFYDATARECV (Notify through the callback (if set) that some data have been received. )
+			
+	* th.AddCircuit();
+		- create CircuitDescriptor
+		- AddRelay():
+			* create RelayDescriptor -> add to desc_list for each respective relay
+			* create TorApp():
+				- tapp = m_factory.Create<TorBaseApp> (): because of TypeId = TorApp a TorApp is created ??! 
+					* NS_LOG_FUNTION(this)
+					* set TorApp attributes
+			* add relayApp (TorBaseApp) to relayApps_list 
+			
+	* th.BUILDTOPOLOGY:
+		- create PointToPoint link
+		- makeLinkDelaysFuzzy
+		- install stack, ip addresses, routingTables
+		- INSTALLCIRCUITS():
+			* iterate over circuits and INSTALLTORAPP() on entry, middle, exit relay:
+				- return desc.tapp for each relay
+			* get IP adresses and create 2 new ones for server & user
+			
+			* TorBaseApp::AddCircuits() on all relays+client&server:
+				- (int circ_id, Ipv4Address n_ip, int n_conntype, Ipv4Address p_ip, int p_conntype, Ptr<PseudoClientSocket> clientSocket)
+				- NS_LOG_FUNCTION (this)
+				- assert valid connection type
+			OR
+			* TorApp:ADDCIRCUITS():
+				- addCircuit (TorBaseApp)
+				- add connections & active circuits
+				
+			* remember theoretical hop-by-hop RTTs
+			
+	* th.GetTorAppsContainer():
+		- get relayApps (=TorBaseApps)
+		
+	* schedule StatsCallBack for printing results
+				
+-----
+				
+Simulation::RUN():
+	* requestpage starts at StartTime and sends notification that data has been received
+	
+-----
+	
+TorApp::StartApplication:
+	* create sockets and bind to node names
+	* make callbacks: m_readbucket.SetRefilledCallback (MakeCallback (&TorApp::RefillReadCallback, this)), m_writebucket.SetRefilledCallback (MakeCallback (&TorApp::RefillWriteCallback, this)),
+		socket->SetAcceptCallback= (MakeNullCallback<bool,Ptr<Socket>,const Address &> (),
+                                    MakeCallback (&TorApp::HandleAccept,this)), 
+                                    socket->SetSendCallback()=(MakeCallback(&TorApp::ConnWriteCallback, this)),  socket->SetRecvCallback()=(MakeCallback (&TorApp::ConnReadCallback, this))
+	* set up connections
+	* m_triggerAppStart (Ptr<TorBaseApp>(this))
+
+=> TorBaseApp::StartApplication:
+	* fill m_readbucket, m_writebucket (initialized in tor-base.cc
+
+----- READ -----
+	
+=> MAYBE like this the RefilledCall for the m_readbucket and m_writebucket are called
+=> RefillReadCallback:
+	* if m_readbucket got bigger: connection->scheduleRead(10 ns):
+		- read_event = Simulator::Schedule (delay, &TorApp::ConnReadCallback, torapp, m_socket);
+		
+=> ConnReadCallback:
+	* max_read = RoundRobin (base, m_readbucket.GetSize ()):
+		- Helper function to decide how many bytes out of global_bucket we're willing to use for this transaction
+	* conn::Read:
+		- read bytes to packet_list in chunks of max_read
+		- m_socket->recv (&raw_data[this->inbuf.size], max_read, 0):
+			* create m_request and get size to be read
+			* update m_leftToSend
+			* set m_requestSent = Simulator::Now ();
+			* Simulator::ScheduleNow (&PseudoClientSocket::NotifyDataRecv, this)
+		- slice data into packets & save leftover
+		- return read_bytes (received from socket)
+	* depending on conn ReceiveRelayCell or PackageRelayCell (Connection::SpeaksCell(): conn_type == RELAYEDGE)
+		- RECEIVERELAYCELL:
+		- find target connection for relaying
+		- AppendCellToCircuitQueue(circ, cell, direction):
+			* get next connection in this direction
+			* push cell to this connection
+			* ScheduleWrite():
+				- write_event = Simulator::Schedule (delay, &TorApp::ConnWriteCallback, torapp, m_socket, m_socket->GetTxAvailable ())
+		- PACKAGERELAYCELL:
+		- opposite direction???
+		- AppendCellToCircuitQueue(circ, cell, direction)
+	* read_bytes > 0:
+		- decrement global bucket if 
+		- add some delay (conn->ScheduleRead (delay)) before continue reading:
+			* Simulator::Schedule (delay, &TorApp::ConnReadCallback, torapp, m_socket)
+			=> everything starts again if this callback is then called
+
+----- WRITE -----
+
+=> RefillWriteCallback:
+	* if m_writebucket got bigger: connection->scheduleWrite():
+		- write_event = Simulator::Schedule (delay, &TorApp::ConnWriteCallback, torapp, m_socket, m_socket->GetTxAvailable ())
+		
+=> ConnWriteCallback (triggered by RefillWriteCallback and ScheduleWrite in ConnReadCallback):
+	* get connection and m_leftToRead = (socket->getTxAvailable)
+	* max_write = RoundRobin (base, m_writebucket.GetSize ()):
+		- Helper function to decide how many bytes out of global_bucket we're willing to use for this transaction
+	* written_bytes = Connection::Write(max_write):
+		- GetActiveCircuits()
+		- create new cell
+		- while datasize < max_write (data_size=outbuf_size)
+			* again get active circuit
+			* CIRCUIT::POPCELL() in direction of circuit:
+				- get connection in direction
+				- if no RELAYEDGE:
+					* CreateSendme (create packet, add circId etc)
+					* push sendme cell to queue
+					* ScheduleWrite in opposite direction:
+						- Simulator::Schedule (delay, &TorApp::ConnWriteCallback, torapp, m_socket, m_socket->GetTxAvailable ())
+				- return cell
+			* get opposite conn & if server: torapp->m_triggerBytesEnteredNetwork()
+			* datasize += cellsize
+			=> read in all data until max_write
+		- set next circuit to active
+		- max_write > 0:
+			* socket::Send() = written_bytes:
+				- if (recvCallback) set recvCallback again (WHY?)
+				- Simulator::ScheduleNow (&PseudoClientSocket::NotifySend, this, GetTxAvailable ());
+				- Simulator::ScheduleNow (&PseudoClientSocket::NotifyDataSent, this, size)
+		- save leftover for next time
+		- return written_bytes
+	* written_bytes > 0:
+		- GlobalBucketsDecrement(): decrement m_writebucket
+		- conn->ScheduleWrite (): /try flushing more)
+			* Simulator::Schedule (delay, &TorApp::ConnWriteCallback, torapp, m_socket, m_socket->GetTxAvailable ()
+			
+	
+	
+	
+	

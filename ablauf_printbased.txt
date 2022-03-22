@@ -1,0 +1,64 @@
+4 times initialize TorApp (per node)
+
+4x hintereinander:
+    add circuits via TorBaseApp
+
+    2x TorApp add connections
+
+    2x TorApp add active circuits
+
+topology built
+
+start simulation
+
+start TorApp & TorBaseApp
+
+write- & readbucket: 100.000.000
+
+Start TorApp Application 
+Start TorBaseApp Application 
+read bucket: 100000000 write bucket: 100000000
+TorStart: remember 10.1.1.2 -> proxy1
+for loop to set up connections
+ConnType Proxyedge (PseudoClient)
+Socket m_leftToRead: 0
+for loop to set up connections
+Normal (forward?) socket
+Socket m_leftToRead: 131072
+Completed start application 
+
+Start TorApp Application 
+Start TorBaseApp Application 
+read bucket: 100000000 write bucket: 100000000
+TorStart: remember 10.1.2.2 -> entry1
+for loop to set up connections
+for loop to set up connections
+Normal (forward?) socket
+Socket m_leftToRead: 131072
+Completed start application 
+
+Start TorApp Application 
+Start TorBaseApp Application 
+read bucket: 25000 write bucket: 25000
+TorStart: remember 10.1.3.2 -> btlnk
+for loop to set up connections
+for loop to set up connections
+Normal (forward?) socket
+Socket m_leftToRead: 131072
+Completed start application 
+
+Start TorApp Application 
+Start TorBaseApp Application 
+read bucket: 100000000 write bucket: 100000000
+TorStart: remember 10.1.4.2 -> exit1
+for loop to set up connections
+for loop to set up connections
+ConnType Serveredge (PseudoServer)
+Socket m_leftToRead: 498
+Completed start application 
+
+=> on every socket runs another application
+=> write& read bucket are refilled (with callback in background?)
+=> bytes are read from Socket.m_leftToRead (ConnWriteCallback??)
+
+Conn und Refill Callback immer im Wechsel 

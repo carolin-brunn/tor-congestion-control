@@ -1,0 +1,5 @@
+Waf: Entering directory `/home/carolin/Schreibtisch/uni/masterProject/git/my-predictor-congestion/build'
+Waf: Leaving directory `/home/carolin/Schreibtisch/uni/masterProject/git/my-predictor-congestion/build'
+Build commands will be stored in build/compile_commands.json
+'build' finished successfully (1.709s)
+[01;31mInterrupted[0m 
