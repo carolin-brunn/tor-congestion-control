@@ -367,6 +367,18 @@ TorApp::PackageRelayCell (Ptr<Connection> conn, Ptr<Packet> cell)
       //      circuits is empty
       //  ==> server only!!
     }
+
+  else if ((circ->GetCwnd() - circ->GetInflight()) <= 0)
+    {
+      //cout << "[" << GetNodeName() << ": Circuit " << circ->GetId () << "] Package window empty now. Block reading from " << conn->GetRemote() << "\n";
+      NS_LOG_LOGIC ("[" << GetNodeName() << ": Circuit " << circ->GetId () << "] Package window empty now. Block reading from " << conn->GetRemote());
+      conn->SetBlocked (true);
+      // TODO blocking the whole connection if SENDME window for one of its
+      //      circuits is empty
+      //  ==> server only!!
+    }
+
+  
 }
 
 void
@@ -644,34 +656,43 @@ Circuit::Circuit (uint16_t circ_id, Ptr<Connection> n_conn, Ptr<Connection> p_co
   this->m_pckCounter = 0;
   this->m_num_sendmes = 0;
   
-  this->cc_cwnd_init = m_windowStart;
-  this->cwnd = cc_cwnd_init;
-  this->cc_sendme_inc = m_windowIncrement; //currently 50
-  this->cc_cwnd_inc = m_windowIncrement;
-  this->cc_cwnd_min = 100;
+  this->cc_sendme_inc = m_windowIncrement; // 25, 33, 50
+  this->cc_cwnd_inc = cc_sendme_inc; // 25,50,100, default: 31, cc_sendme_inc worked best
 
-  this->cc_bwe_min = 10;
-  this->cc_ewma_cwnd_cnt = 10; 
+  this->cc_cwnd_init = m_windowStart; //std::max(cc_sendme_inc, (cc_bwe_min*cc_sendme_inc)); // 150, 200, 250, 500, default: 4*31 TODO
+  this->cwnd = cc_cwnd_init; 
+
+  this->cc_cwnd_min = std::max((cc_bwe_min*cc_sendme_inc), cc_sendme_inc); //std::max(31, cc_sendme_inc) ; // [100, 150, 200], default: 31
+  this->cc_cwnd_max = INT_MAX; //[5000, 10000, 20000], default: INT_MAX
+  this->cc_cwnd_inc_rate = 5; // [1, 2, 5, 10]
+
+
+  this->cc_bwe_min = 5; // 4-10, default: 5
+  cc_bwe_min = std::min(cc_bwe_min, (cc_cwnd_min/cc_sendme_inc));  
+  this->cc_ewma_cwnd_pct = 50; // [25,50,100], default: 50, 100
+  this->cc_ewma_max = 10; // [10, 20], default: 10
+
+  this->in_slow_start = true;
+  this->cc_cwnd_inc_pct_ss = 50; // 50,100,200, default: 50
+  this->next_cc_event = 10;
 
   this->m_num_sendme_timestamp_delta = 0;
-  this->m_min_rtt = 100.0; //Time(400000000000); //std::numeric_limits<double>::max());
-  this->m_max_rtt = 0.0; //Time(0);
-  this->m_curr_rtt = 0; //Time(0);
+  this->m_min_rtt = 100.0; 
+  this->m_max_rtt = 0.0; 
+  this->m_curr_rtt = 0;
 
   // WESTWOOD
-  this->cc_westwood_rtt_thresh = 33;
-  this->cc_westwood_backoff_min = false;
-  this->cc_westwood_cwnd_m = 75;
-  this->cc_westwood_rtt_m = 1; //TODO: 100??
+  this->cc_westwood_rtt_thresh = 33; // [20, 33, 40, 50], default: 33
+  this->cc_westwood_min_backoff = false; // [false, true], default: false
+  this->cc_westwood_cwnd_m = 0.75; // [50, 66, 75] by 100, deault: 75 (0.75)
+  this->cc_westwood_rtt_m = 0.5; // [50, 100] by 100 => DECREASE RTT_max
   // VEGAS
-  this->cc_vegas_alpha = 3*cc_sendme_inc;
+  this->cc_vegas_alpha = 6*cc_sendme_inc - cc_sendme_inc;
   this->cc_vegas_beta =  6*cc_sendme_inc;
   this->cc_vegas_gamma = 6*cc_sendme_inc;
-  // WESTWOOD + VEGAS
-  this->in_slow_start = true;
-  this->cc_cwnd_inc_pct_ss = 1; // TODO: see percentage?!100;
+  this->cc_vegas_delta = 6*cc_sendme_inc + 2*cc_sendme_inc;
   // NOLA
-  this->cc_nola_overshoot = 100;
+  this->cc_nola_overshoot = 100; // 0, 50, 100, 150, 200, default: 100
 }
 
 
@@ -818,6 +839,7 @@ Circuit::PushCell (Ptr<Packet> cell, CellDirection direction)
           if (IsSendme (cell))
             {
               NS_LOG_LOGIC ("[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () << "] Received SENDME cell." );
+              
               // OLD CONGESTION CONTROL
               if(oldCongControl)
                 {
@@ -826,6 +848,7 @@ Circuit::PushCell (Ptr<Packet> cell, CellDirection direction)
                   NS_LOG_LOGIC ("[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () << "] Received SENDME cell. Package window now " << package_window);
                   //cout << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () << "] Received SENDME cell. Package window now " << package_window;
                 }
+
               // NEW CONGESTION CONTROL
               else
                 {
@@ -843,7 +866,7 @@ Circuit::PushCell (Ptr<Packet> cell, CellDirection direction)
                   double curr_bdp = cc_cwnd_init;
 
                   // calculate BDP and update CWND only after min number of packets has been received
-                  if (m_num_sendmes > cc_bwe_min)
+                  if (m_num_sendmes >= cc_bwe_min)
                     {
                       curr_bdp = CalculateBDP(conn, direction);
                       NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
@@ -886,20 +909,20 @@ Circuit::PushCell (Ptr<Packet> cell, CellDirection direction)
 
 // NEW
 /*
- * recursively calculate EWMA smoothing for RTT values over cc_ewma_cwnd_cnt rounds
+ * recursively calculate EWMA smoothing for RTT values over cc_ewma_cwnd_pct rounds
  * Exponentially Weighted Moving Average: statistical measure used to model a time series
  * designed as such that older observations are given lower weights
  * r - indicates the current "round"
  */
 double 
-Circuit::CalcEWMASmoothingRTT(int r)
+Circuit::CalcEWMASmoothingRTT(int r, int n_iter)
 {
   double alpha = 0.8;
   double tmp = 0.0;
-  if(r < cc_ewma_cwnd_cnt)
+  if(r < n_iter)
     {
       tmp = alpha * m_raw_rtt.at( m_raw_rtt.size()-r) 
-                    + (1-alpha) * CalcEWMASmoothingRTT( r+1 );
+                    + (1-alpha) * CalcEWMASmoothingRTT( r+1, n_iter );
     }
   else
     {
@@ -925,6 +948,7 @@ Circuit::CalculateRtt( Ptr<Connection> conn ) //map<uint16_t,Time> sent_time, ma
   if (curr_rtt <= 0)
     {
       // TODO: add error handling
+      NS_ABORT_MSG ("Circuit::CalculateRtt(): Unexpected RTT below zero");
       return;
     }
   
@@ -932,20 +956,8 @@ Circuit::CalculateRtt( Ptr<Connection> conn ) //map<uint16_t,Time> sent_time, ma
   m_curr_rtt = curr_rtt.GetSeconds();
   m_raw_rtt.push_back(m_curr_rtt);
   
-  // do EWMA smoothing over cc_ewma_cwnd_cnt values if possible
-  if( int(m_raw_rtt.size()) >= cc_ewma_cwnd_cnt )
-    { 
-      m_curr_rtt = CalcEWMASmoothingRTT(1);
-    }
-
-  // save current RTT (EWMA smoothed if possible)
-  m_ewma_rtt.push_back(m_curr_rtt);
-
-  /*
-    TODO: Question: min/max rtt also ewma smoothed or the raw value????
-  */
   // update min and max RTT (min only after certain number of rounds to allow smoothing)
-  if ( m_curr_rtt < m_min_rtt && (int(m_ewma_rtt.size()) >= cc_ewma_cwnd_cnt) )//( m_curr_rtt < m_min_rtt && int(m_pckCounter) >= cc_ewma_cwnd_cnt)
+  if ( m_curr_rtt < m_min_rtt ) // && (int(m_ewma_rtt.size()) >= cc_ewma_cwnd_pct) )//( m_curr_rtt < m_min_rtt && int(m_pckCounter) >= cc_ewma_cwnd_pct)
     {
       m_min_rtt = m_curr_rtt;
       NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
@@ -954,10 +966,25 @@ Circuit::CalculateRtt( Ptr<Connection> conn ) //map<uint16_t,Time> sent_time, ma
       //          "NEW min RTT: "<< m_min_rtt << " pck no: " << m_pckCounter << "\n";
   
     }
-  if( curr_rtt > m_max_rtt)
-   {
-     m_max_rtt = m_curr_rtt;
-   }
+  if( m_curr_rtt > m_max_rtt)
+    {
+      m_max_rtt = m_curr_rtt;
+      //cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
+      //          "NEW max RTT: "<< m_max_rtt << " pck no: " << m_pckCounter << "\n";
+  
+    }
+
+  //int no_smoothing = m_raw_rtt.size() * cc_ewma_cwnd_pct / 100;
+  int no_smoothing = (cwnd/cc_sendme_inc) * cc_ewma_cwnd_pct / 100;
+  no_smoothing = std::max(std::min(no_smoothing, cc_ewma_max), 2);
+  // calculate EWMA smoothing over cc_ewma_cwnd_pct values if possible
+  if( int(m_raw_rtt.size()) >= no_smoothing )
+    { 
+      m_curr_rtt = CalcEWMASmoothingRTT(1, no_smoothing);
+    }
+
+  // save current RTT (EWMA smoothed if possible)
+  m_ewma_rtt.push_back(m_curr_rtt);
 
   NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
               "RTT values:\n curr:" << curr_rtt.GetSeconds() << " EWMA smoothed: " << m_curr_rtt << " min: " << m_min_rtt << " max: " << m_max_rtt);
@@ -966,20 +993,20 @@ Circuit::CalculateRtt( Ptr<Connection> conn ) //map<uint16_t,Time> sent_time, ma
 
 // NEW
 /*
- * recursively calculate EWMA smoothing for BDP values over cc_ewma_cwnd_cnt rounds
+ * recursively calculate EWMA smoothing for BDP values over cc_ewma_cwnd_pct rounds
  * description above
  * r indicates the current "round"
  */
 double 
-Circuit::CalcEWMASmoothingBDP(int r)
+Circuit::CalcEWMASmoothingBDP(int r, int n_iter)
 {
   cout << "CALC BDP Smoothing\n";
-  double N = cc_ewma_cwnd_cnt;
+  double N = cc_ewma_cwnd_pct;
   double tmp = 0.0;
-  if(r < cc_ewma_cwnd_cnt)
+  if(r < n_iter)
     {
       tmp = (2 * m_sendme_bdp_list.at( m_sendme_bdp_list.size()-r) / (N+1) )
-                    + ( (N-1) * CalcEWMASmoothingBDP(r+1) / (N+1) );
+                    + ( (N-1) * CalcEWMASmoothingBDP(r+1, n_iter) / (N+1) );
     }
   else
     {
@@ -1011,10 +1038,13 @@ Circuit::CalculateBDP ( Ptr<Connection> conn, CellDirection direction )
     {
       bdp_sendme = CalculateBDP_sendme ();
       // BDP EWMA smoothing for SENDME estimator
-      // TODO: N times, correct?!
-      if( int(m_sendme_bdp_list.size()) > cc_ewma_cwnd_cnt)
+      //int no_smoothing = m_sendme_bdp_list.size() * cc_ewma_cwnd_pct / 100;
+      int no_smoothing = (cwnd/cc_sendme_inc) * cc_ewma_cwnd_pct / 100;
+      no_smoothing = std::max(std::min(no_smoothing, cc_ewma_max), 2);
+
+      if( int(m_sendme_bdp_list.size()) > no_smoothing)
         {
-          bdp_sendme = CalcEWMASmoothingBDP(1);
+          bdp_sendme = CalcEWMASmoothingBDP(1, no_smoothing );
         }
       bdp_cwnd = CalculateBDP_cwnd ();
       bdp_inflight = CalculateBDP_inflight (direction);
@@ -1035,10 +1065,13 @@ Circuit::CalculateBDP ( Ptr<Connection> conn, CellDirection direction )
     {
       bdp = CalculateBDP_sendme ();
       // BDP EWMA smoothing for SENDME estimator
-      // TODO: N times, correct?!
-      if( int(m_sendme_bdp_list.size()) > cc_ewma_cwnd_cnt)
+      //int no_smoothing = m_sendme_bdp_list.size() * cc_ewma_cwnd_pct / 100;
+      int no_smoothing = (cwnd/cc_sendme_inc) * cc_ewma_cwnd_pct / 100;
+      no_smoothing = std::max(std::min(no_smoothing, cc_ewma_max), 2);
+
+      if( int(m_sendme_bdp_list.size()) > no_smoothing)
         {
-          bdp = CalcEWMASmoothingBDP(1);
+          bdp = CalcEWMASmoothingBDP(1, no_smoothing);
         }
     }
 
@@ -1054,7 +1087,8 @@ Circuit::CalculateBDP ( Ptr<Connection> conn, CellDirection direction )
 
   else
     {
-      cout << "TODO: Please choose a valid algorithm to estimate the BDP";
+      //cout << "TODO: Please choose a valid algorithm to estimate the BDP";
+      NS_ABORT_MSG ("Circuit::CalculateBDP(): Invalid BDP algorithm");
     }
   //cout << "BDP values: sendme: " << bdp_sendme << " cwnd: " << bdp_cwnd <<
   //    " inflight: " << bdp_inflight << " piecewise: " << bdp << "\n";
@@ -1113,7 +1147,7 @@ Circuit::CalculateBDP_cwnd ()
   //    " ewma rtt: " << curr_ewma_rtt << "\n";
   /*NS_LOG_LOGIC  (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
             "BDP cwnd TIMESTAMPS: BDP: " << bdp << " cwnd: " << cwnd << " min RTT: "<< minrtt << " curr rtt: " << curr_rtt);*/
-  return bdp+1; // TODO error fixing because bdp shouldnt be inflight
+  return bdp; // TODO error fixing because bdp shouldnt be inflight
 }
 
 // NEW
@@ -1131,7 +1165,7 @@ Circuit::CalculateBDP_inflight( CellDirection direction )
   
   /*NS_LOG_LOGIC  (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
             "BDP: " << bdp << " m_inflight: " << m_inflight << " min RTT: "<< m_min_rtt << " curr rtt: " << curr_ewma_rtt);*/
-  return bdp+1; // TODO error fixing because bdp shouldnt be inflight
+  return bdp; // TODO error fixing because bdp shouldnt be inflight
 }
 
 
@@ -1315,6 +1349,7 @@ Circuit::GetQueueSizeBytes (CellDirection direction)
   return result;
 }
 
+/*
 uint32_t
 Circuit::GetPackageWindow ()
 {
@@ -1328,6 +1363,24 @@ Circuit::GetPackageWindow ()
       uint32_t delta = cwnd - m_inflight;
       return delta;
     } 
+}
+*/
+uint32_t
+Circuit::GetPackageWindow ()
+{
+  return package_window;
+}
+
+uint32_t
+Circuit::GetCwnd ()
+{
+  return cwnd;
+}
+
+uint32_t
+Circuit::GetInflight ()
+{
+  return m_inflight;
 }
 
 void
@@ -1389,43 +1442,56 @@ Circuit::UpdateCwnd_westwood (double curr_bdp, Ptr<Connection> conn)
   cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
       "] WESTWOOD: Current Cwnd: " << cwnd << " inflight: " << m_inflight <<
       " dif: " << (cwnd-m_inflight) << " used bdp: " << std::to_string(curr_bdp);
-  if ( ( m_curr_rtt < (100-cc_westwood_rtt_thresh)*m_min_rtt/100 
-                    + cc_westwood_rtt_thresh*m_max_rtt/100) 
-                    || (conn->IsBlocked ()) )
+  if (next_cc_event > 0)
     {
-      if (in_slow_start)
-        {
-          cwnd += cwnd * cc_cwnd_inc_pct_ss;
-        }
-      else
-        {
-          cwnd = cwnd + cc_cwnd_inc;
-        }
+      next_cc_event--;
     }
-  else
-   {
-      if( cc_westwood_backoff_min )
+  else if(next_cc_event == 0)
+    {
+      if ( ( m_curr_rtt < (100-cc_westwood_rtt_thresh)*m_min_rtt/100 
+                        + cc_westwood_rtt_thresh*m_max_rtt/100) 
+                        || (conn->IsBlocked ()) )
         {
-          cwnd = std::min( cwnd * cc_westwood_cwnd_m , int(curr_bdp) ); 
+          if (in_slow_start)
+            {
+              //cout << "first condition + slow start\n";
+              //cout << "m_curr_rtt: " << m_curr_rtt << " other term: " << (100-cc_westwood_rtt_thresh)*m_min_rtt/100 + cc_westwood_rtt_thresh*m_max_rtt/100 << 
+              //        " blocked: " << conn->IsBlocked() << "\n";
+              double cwnd_inc = cwnd * cc_cwnd_inc_pct_ss/100;
+              cwnd = cwnd + cwnd_inc;
+              //cwnd += cwnd * cc_cwnd_inc_pct_ss; // TODO check += oder = ???
+            }
+          else
+            {
+              //cout << "first condition + fast mode\n";
+              cwnd = cwnd + cc_cwnd_inc;
+            }
         }
       else
         {
-          cwnd = std::max( cwnd * cc_westwood_cwnd_m, int(curr_bdp) );
+          if( cc_westwood_min_backoff )
+            {
+              //cout << "second condition + backoff_min\n";
+              cwnd = std::min( cwnd * cc_westwood_cwnd_m , curr_bdp ); 
+            }
+          else
+            {
+              //cout << "second condition + backoff_max\n";
+              cwnd = std::max( cwnd * cc_westwood_cwnd_m, curr_bdp );
+            }
+          in_slow_start = false;
+          m_max_rtt = m_min_rtt + cc_westwood_rtt_m * (m_max_rtt - m_min_rtt);
         }
-      in_slow_start = false;
-      m_max_rtt = m_min_rtt + cc_westwood_rtt_m * (m_max_rtt - m_min_rtt);
-   }
-  
-  cwnd = std::max(cwnd, cc_cwnd_min);
-  
-  NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-            "] WESTWOOD UPDATE cwnd = cwnd + cc_cwnd_inc => max(cwnd * cc_westwood_cwnd_m, curr_bdp)\n" <<
-            "UPDATED cwnd = " << cwnd);
-  cout << " update cwnd: " << cwnd;
-  //cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-  //          "] WESTWOOD UPDATE as cwnd = cwnd + cc_cwnd_inc => max(cwnd * cc_westwood_cwnd_m, curr_bdp)\n" <<
-  //          "UPDATED cwnd = " << cwnd << "\n";
-  // TODO: ??!!! next_cc_event = cwnd / (cc_cwnd_inc_rate * cc_sendme_inc);
+      
+      cwnd = std::min(std::max(cwnd, cc_cwnd_min), cc_cwnd_max);
+      
+      NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
+                "] WESTWOOD UPDATE cwnd = cwnd + cc_cwnd_inc => max(cwnd * cc_westwood_cwnd_m, curr_bdp)\n" <<
+                "UPDATED cwnd = " << cwnd);
+      //cout << " UPDATE cwnd: " << cwnd;
+
+      next_cc_event = cwnd / (cc_cwnd_inc_rate * cc_sendme_inc);
+    }
 }
 
 // NEW
@@ -1437,52 +1503,81 @@ Circuit::UpdateCwnd_vegas (double curr_bdp, Ptr<Connection> conn)
   cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
             "] VEGAS: Current Cwnd: " << cwnd << " inflight: " << m_inflight << 
             " dif: " << (cwnd-m_inflight) << " used bdp: " << curr_bdp;
-            int queue_use = 0;
-  if( curr_bdp > cwnd)
+  int queue_use = 0;
+  if ( next_cc_event > 0)
     {
-      queue_use = 0;
+      next_cc_event--;
     }
-  else
+  else if(next_cc_event == 0)
     {
-      queue_use = cwnd - curr_bdp;
-    }
-
-  if(in_slow_start)
-    {
-      if( (queue_use < cc_vegas_gamma) || !(conn->IsBlocked()) )
+      if( curr_bdp > cwnd)
         {
-          // TODO: is cc_cwnd_inc_pct_ss=100 or 1???
-          cwnd = std::max((cwnd*cc_cwnd_inc_pct_ss), int(curr_bdp)); // TODO: really 100 or rather 1 since it is percentage=> range from 0-1?!
+          queue_use = 0;
         }
       else
         {
-          cwnd = curr_bdp;
-          in_slow_start = false;
+          queue_use = cwnd - curr_bdp;
         }
-    }
-  else
-    {
-      if( (queue_use > cc_vegas_beta) || (conn->IsBlocked()) )
-        {
-          //cout << "queue use: " << queue_use << " vegas beta: " << cc_vegas_beta << "\n";
-          cwnd += cc_cwnd_inc;
-        }
-      else if( queue_use < cc_vegas_alpha )
-        {
-          //cout << "queue use: " << queue_use << " vegas alpha: " << cc_vegas_alpha << "\n";
-          cwnd -= cc_cwnd_inc;
-        }
-    }
-  cwnd = std::max(cwnd, cc_cwnd_min);
-  NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-            "] VEGAS: UPDATE as CWND = max(cwnd*100, curr_bdp) => cwnd += cc_cwnd_inc (sometimes) => max(cwnd, cc_cwnd_min)\n" << 
-            " UPDATED cwnd = " << cwnd );
-  /*cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-            "] VEGAS: UPDATE as CWND = max(cwnd*100, curr_bdp) => cwnd += cc_cwnd_inc (sometimes) => max(cwnd, cc_cwnd_min)\n" << 
-            " UPDATED cwnd = " << cwnd << "\n";*/
 
-  cout << " update cwnd: " << cwnd ;
-  //next_cc_event = cwnd / (cc_cwnd_inc_rate * cc_sendme_inc)  
+      if(in_slow_start)
+        {
+          if( (queue_use < cc_vegas_gamma) && !(conn->IsBlocked()) )
+            {
+              //cout << "slow start if: queue use: " << queue_use << " vegas gamma: " << cc_vegas_gamma <<
+              //  " blocked: " << conn->IsBlocked() << "\n";
+              int cwnd_inc = cwnd * cc_cwnd_inc_pct_ss/100;
+              cwnd_inc = std::max(cwnd_inc, 2*cc_sendme_inc);
+              cwnd = std::max((cwnd+cwnd_inc), int(curr_bdp)); 
+              //cwnd = std::max((cwnd*cc_cwnd_inc_pct_ss), curr_bdp); // TODO: really 100 or rather 1 since it is percentage=> range from 0-1?!
+            }
+          else
+            {
+              //cout << "slow start else: queue use: " << queue_use << " vegas gamma: " << cc_vegas_gamma <<
+              //  " blocked: " << conn->IsBlocked() << "\n";
+              cwnd = curr_bdp + cc_vegas_gamma;
+              in_slow_start = false;
+            }
+        }
+      else
+        {
+          if(queue_use > cc_vegas_delta)
+            {
+              cwnd = curr_bdp + cc_vegas_delta - cc_cwnd_inc;
+            }
+          else if( (queue_use > cc_vegas_beta) || (conn->IsBlocked()) )
+            {
+              //cout << "fast start if: queue use: " << queue_use << " vegas beta: " << cc_vegas_beta <<
+              //  " blocked: " << conn->IsBlocked() << "\n";
+              //cout << "queue use: " << queue_use << " vegas beta: " << cc_vegas_beta << "\n";
+              cwnd -= cc_cwnd_inc;
+            }
+          else if( queue_use < cc_vegas_alpha )
+            {
+              //cout << "fast start if: queue use: " << queue_use << " vegas alpha: " << cc_vegas_alpha <<
+              //  " blocked: " << conn->IsBlocked() << "\n";
+              //cout << "queue use: " << queue_use << " vegas alpha: " << cc_vegas_alpha << "\n";
+              cwnd += cc_cwnd_inc;
+            }
+        }
+      cwnd = std::min(std::max(cwnd, cc_cwnd_min), cc_cwnd_max);
+      NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
+                "] VEGAS: UPDATE as CWND = max(cwnd*100, curr_bdp) => cwnd += cc_cwnd_inc (sometimes) => max(cwnd, cc_cwnd_min)\n" << 
+                " UPDATED cwnd = " << cwnd );
+      /*cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
+                "] VEGAS: UPDATE as CWND = max(cwnd*100, curr_bdp) => cwnd += cc_cwnd_inc (sometimes) => max(cwnd, cc_cwnd_min)\n" << 
+                " UPDATED cwnd = " << cwnd << "\n";*/
+
+      //cout << " UPDATE cwnd: " << cwnd ;
+    
+      if(in_slow_start)
+        {
+          next_cc_event = cwnd/cc_sendme_inc;
+        }
+      else
+        {
+          next_cc_event = cwnd / (cc_cwnd_inc_rate * cc_sendme_inc);
+        } 
+    }
   return;
 }
 
@@ -1505,7 +1600,7 @@ Circuit::UpdateCwnd_nola (double curr_bdp, Ptr<Connection> conn)
       cwnd = curr_bdp + cc_nola_overshoot;
     }
 
-  cwnd = std::max(cwnd, cc_cwnd_min); // 100 is specified as lower range end for circwindow
+  cwnd = std::min(std::max(cwnd, cc_cwnd_min), cc_cwnd_max); 
 
   NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
             "] NOLA: UPDATE as CWND = curr_bdp (+overshoot if not blocked)\n" << 
@@ -1514,7 +1609,7 @@ Circuit::UpdateCwnd_nola (double curr_bdp, Ptr<Connection> conn)
             "] NOLA: UPDATE as CWND = curr_bdp (+overshoot if not blocked)\n" << 
             " UPDATED cwnd = " << cwnd << "\n";*/
 
-  cout << " update cwnd: " << cwnd ;
+  //cout << " update cwnd: " << cwnd ;
   return;
 }
 

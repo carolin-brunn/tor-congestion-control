@@ -1,0 +1,37 @@
+#! /bin/bash
+
+#./waf --run "scratch/tor-example --congFlavor=westwood --bdpFlavor=piecewise --oldCongControl=0 --nCirc=3 --run=1"
+
+l_bdp="piecewise"
+l_tcp="westwood" # vegas nola"
+oldCong=0
+a_ncirc=(1 5)
+a_runs=(1 2 3 4 5) # 6 7 8 9 10)
+
+for run in ${a_runs[@]}
+do
+	for ncirc in ${a_ncirc[@]}
+	do
+		for tcp in $l_tcp
+		do
+			for bdp in $l_bdp
+			do
+				./waf --run "scratch/tor-example --congFlavor=$tcp --bdpFlavor=$bdp --oldCongControl=$oldCong --nCirc=$ncirc --run=$run"
+			done
+		done
+	done
+done
+
+#oldCong=1
+
+#for run in ${a_runs[@]}
+#do
+#	for ncirc in ${a_ncirc[@]}
+#	do
+#		./waf --run "scratch/tor-example --oldCongControl=$oldCong --nCirc=$ncirc --run=$run"
+#	done
+#done
+
+
+
+

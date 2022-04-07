@@ -11,13 +11,13 @@ void StatsCallback(TorStarHelper*, Time);
 
 int main (int argc, char *argv[]) {
     uint32_t run = 1;
-    std::string sim_t = "15s";
+    std::string sim_t = "120s";
     Time simTime = Time(sim_t);
-    uint32_t rtt = 100; // TODO: die rtt mal hochsetzen und Veränderung angucken!!!
+    uint32_t rtt = 100; // TODO: adjustable parameter for further analysis
     string flavor = "vanilla";
     string congFlavor = "vegas"; //nola/westwood/vegas
     string bdpFlavor = "piecewise"; //sendme/cwnd/inflight
-    int oldCongControl = 0; // TODO bool!
+    int oldCongControl = 0; 
     int nCirc = 1;
 
     LogComponentEnable ("TorExample", LOG_LEVEL_INFO);
@@ -52,7 +52,7 @@ int main (int argc, char *argv[]) {
     Config::SetDefault ("ns3::TorApp::WindowIncrement", IntegerValue (50));
     Config::SetDefault ("Circuit::CongestionFlavor", StringValue(congFlavor));
     Config::SetDefault ("Circuit::BDPFlavor", StringValue(bdpFlavor));
-    Config::SetDefault ("Circuit::oldCongControl", IntegerValue(oldCongControl)); // TODO BoolValue??!
+    Config::SetDefault ("Circuit::oldCongControl", IntegerValue(oldCongControl));
 
     cout << "Set up topology\n";
     NS_LOG_INFO("setup topology");
@@ -78,6 +78,9 @@ int main (int argc, char *argv[]) {
     Ptr<ConstantRandomVariable> m_bulkThink = CreateObject<ConstantRandomVariable>();
     m_bulkThink->SetAttribute("Constant", DoubleValue(0));
 
+    double test = m_bulkRequest->GetConstant();
+    cout << "bulk Request: " << test << "\n";
+
     Ptr<UniformRandomVariable> m_startTime = CreateObject<UniformRandomVariable> ();
 
     m_startTime->SetAttribute ("Min", DoubleValue (0.1));
@@ -89,23 +92,38 @@ int main (int argc, char *argv[]) {
     // AddCircuit (int id, string entryName, string middleName, string exitName, Ptr<PseudoClientSocket> clientSocket)
     // RequestPage is scheduled if ClientSocket is initialized
 
-    for(int n = 1; n <= nCirc; n++)
+    /*for(int n = 1; n <= nCirc; n++)
         {
             th.AddCircuit(n,("entry"+std::to_string(n)),"btlnk",("exit"+std::to_string(n)), 
                     CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
+        } */
+    int n_circ_new = 1;
+    th.AddCircuit(n_circ_new,"entry1","btlnk","exit1", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
+    n_circ_new++;
+    if(n_circ_new <= nCirc)
+        {
+            th.AddCircuit(n_circ_new,"entry2","btlnk","exit2", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
+            n_circ_new++;
         }
-    /*
-    th.AddCircuit(n_circ,"entry1","btlnk","exit1", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
-    n_circ++;
-    th.AddCircuit(n_circ,"entry2","btlnk","exit2", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
-    n_circ++;
-    th.AddCircuit(3,"entry3","btlnk","exit2", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
-    */
-    // set attribute for relay with corresponding nemae (here: btlnk)
-    // TODO: evtl dass auch mal anpassen => zeitlang schneller möglich (durch burst) 
-    // evtl besser in interfaces begrenzen
-    string bwRate = "2";
-    string bwBurst = "2";
+    if(n_circ_new <= nCirc)
+        {
+            th.AddCircuit(n_circ_new,"entry2","btlnk","exit2", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
+            n_circ_new++;
+        }
+    if(n_circ_new <= nCirc)
+        {
+            th.AddCircuit(n_circ_new,"entry4","btlnk","exit2", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
+            n_circ_new++;
+        }
+    if(n_circ_new <= nCirc)
+        {
+            th.AddCircuit(n_circ_new,"entry5","btlnk","exit5", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
+            n_circ_new++;
+        }
+
+
+    string bwRate = "6";
+    string bwBurst = "8";
     th.SetRelayAttribute("btlnk", "BandwidthRate", DataRateValue(DataRate((bwRate + "Mb/s"))));
     th.SetRelayAttribute("btlnk", "BandwidthBurst", DataRateValue(DataRate((bwBurst + "Mb/s"))));
 
@@ -113,18 +131,23 @@ int main (int argc, char *argv[]) {
     th.BuildTopology(); // finally build topology, setup relays and seed circuits
     cout << "topology built\n";
 
-    /* limit the access link */
-    // TODO: vllt besser das ändern, Syntax evtl anders (lookup in 01-single-star-web/sim.cc)
-    // Ptr<Node> client = th.GetTorNode("btlnk");
-    // client->GetDevice(0)->GetObject<PointToPointNetDevice>()->SetDataRate(DataRate("1MB/s"));
-    // client->GetDevice(0)->GetChannel()->GetDevice(0)->GetObject<PointToPointNetDevice>()->SetDataRate(DataRate("1MB/s"));
 
     // change standard output to save output in csv file
-    
-    //std::string path = "simulationData/";
-    std::string filename = "tor_simu_" + sim_t + "_" + congFlavor + "_" + bdpFlavor + "_" +
-                            "rate" + bwRate + "_burst" + bwBurst + "_ncirc" + std::to_string(nCirc) + 
-                            "_oldCong" + std::to_string(oldCongControl) + ".txt";
+    std::string filename = " ";
+    if(oldCongControl)
+    {
+        filename = "tor_simu_" + sim_t + "_rate" + bwRate + "_burst" + bwBurst + 
+                            "_ncirc" + std::to_string(nCirc) + 
+                            "_oldCong" + std::to_string(oldCongControl) + 
+                            "_run" + std::to_string(run) + "_rtt" + std::to_string(rtt) + ".txt";
+    } 
+    else
+    {
+        filename = "tor_simu_" + sim_t + "_" + congFlavor + "_" + bdpFlavor + 
+                            "_rate" + bwRate + "_burst" + bwBurst + "_ncirc" + std::to_string(nCirc) + 
+                            "_oldCong" + std::to_string(oldCongControl) + 
+                            "_run" + std::to_string(run) + "_rtt" + std::to_string(rtt) + "_lowthresh.txt";
+    }    
     std::cout << (filename) << "\n";
     std::ofstream out(filename);
     std::streambuf *coutbuf = std::cout.rdbuf(); //save old buf
@@ -144,8 +167,6 @@ int main (int argc, char *argv[]) {
     NS_LOG_INFO("stop simulation");
     Simulator::Destroy ();
 
-    //cwndFile.close();
-    //logFile.close();
     std::cout.rdbuf(coutbuf); //reset to standard output again
 
     return 0;

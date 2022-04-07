@@ -53,6 +53,8 @@ public:
   void SetNextCirc (Ptr<Connection>, Ptr<Circuit>);
 
   uint32_t GetPackageWindow ();
+  uint32_t GetCwnd ();
+   uint32_t GetInflight ();
   void IncPackageWindow ();
   uint32_t GetDeliverWindow ();
   void IncDeliverWindow ();
@@ -75,8 +77,8 @@ public:
   double CalculateBDP_inflight (CellDirection);
 
   void CalculateRtt (Ptr<Connection>); //map<uint16_t,Time>, map<uint16_t,Time>, int);
-  double CalcEWMASmoothingRTT (int);
-  double CalcEWMASmoothingBDP (int);
+  double CalcEWMASmoothingRTT (int, int);
+  double CalcEWMASmoothingBDP (int, int);
 
   
   static TypeId
@@ -153,11 +155,17 @@ protected:
 
   int cwnd; // NEW congestion window used instead of package window
   int cc_cwnd_min; // NEW minimum circwindow
+  int cc_cwnd_max; // NEW maximum circwindow
   int cc_cwnd_init; // NEW initial value for cwnd
   int cc_sendme_inc; // NEW Specifies how many cells a SENDME acks
   int cc_cwnd_inc; // NEW initial congestion window increment
+  int cc_cwnd_inc_rate; // NEW How often we update our congestion window, per cwnd worth of packets
+              // kept at 1 in Tor!
+  int update_cnt; // NEW counter to update only at cc_cwnd_inc_rate
+
   int cc_bwe_min; // NEW The minimum number of SENDME acks to average over in order to estimate bandwidth
-  int cc_ewma_cwnd_cnt; //NEW specifies how many congestion windows are used to average over
+  int cc_ewma_cwnd_pct; //NEW specifies percent of congestion windows worth of SENDME acks for smoothing
+  int cc_ewma_max; // NEW max no of acks used for congestion window
   
   uint64_t m_pckCounter; // NEW count how many packets have been sent in total
   int m_inflight; // NEW count how many packets have not been acknowledged yet
@@ -173,19 +181,24 @@ protected:
 
   // WESTWOOD
   int cc_westwood_rtt_thresh; // NEW
-  bool cc_westwood_backoff_min; // NEW 1 => take the min of BDP estimate and westwood backoff; 0 => take the max of BDP estimate and westwood backoff.
-  int cc_westwood_cwnd_m; // NEW Specifies how much to reduce the congestion window after a congestion signal, as a fraction of 100.
-  int cc_westwood_rtt_m; // NEW Specifies a backoff percent of RTT_max, upon receipt of a congestion signal.
+  bool cc_westwood_min_backoff; // NEW 1 => take the min of BDP estimate and westwood backoff; 0 => take the max of BDP estimate and westwood backoff.
+  double cc_westwood_cwnd_m; // NEW Specifies how much to reduce the congestion window after a congestion signal, as a fraction of 100.
+        // => change to fraction between 0 and 1. otherwise it would not reduce
+        // fractino of 100 probably only to avoid double values
+
+  double cc_westwood_rtt_m; // NEW Specifies a backoff percent of RTT_max, upon receipt of a congestion signal.
   
   // VEGAS
   // NEW These parameters govern the number of cells that [TOR_VEGAS] can detect in queue before reacting.
   int cc_vegas_alpha;
   int cc_vegas_beta;
   int cc_vegas_gamma;
+  int cc_vegas_delta;
 
   // WESTWOOD & VEGAS
   bool in_slow_start; // NEW keep track whether programm is still in slow start
-  int cc_cwnd_inc_pct_ss; // NEW Percentage of the current congestion window to increment by during slow start, every cwnd 
+  double cc_cwnd_inc_pct_ss; // NEW Percentage of the current congestion window to increment by during slow start, every cwnd 
+  int next_cc_event;
 };
 
 
