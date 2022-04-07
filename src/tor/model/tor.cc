@@ -682,7 +682,7 @@ Circuit::Circuit (uint16_t circ_id, Ptr<Connection> n_conn, Ptr<Connection> p_co
   this->m_curr_rtt = 0;
 
   // WESTWOOD
-  this->cc_westwood_rtt_thresh = 33; // [20, 33, 40, 50], default: 33
+  this->cc_westwood_rtt_thresh = 20; // [20, 33, 40, 50], default: 33
   this->cc_westwood_min_backoff = false; // [false, true], default: false
   this->cc_westwood_cwnd_m = 0.75; // [50, 66, 75] by 100, deault: 75 (0.75)
   this->cc_westwood_rtt_m = 0.5; // [50, 100] by 100 => DECREASE RTT_max

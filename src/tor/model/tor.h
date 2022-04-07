@@ -180,7 +180,7 @@ protected:
   int cc_nola_overshoot; // NEW
 
   // WESTWOOD
-  int cc_westwood_rtt_thresh; // NEW
+  int cc_westwood_rtt_thresh; // NEW define cutoff threshold to deliver congestion signal
   bool cc_westwood_min_backoff; // NEW 1 => take the min of BDP estimate and westwood backoff; 0 => take the max of BDP estimate and westwood backoff.
   double cc_westwood_cwnd_m; // NEW Specifies how much to reduce the congestion window after a congestion signal, as a fraction of 100.
         // => change to fraction between 0 and 1. otherwise it would not reduce

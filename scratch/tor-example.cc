@@ -52,7 +52,7 @@ int main (int argc, char *argv[]) {
     Config::SetDefault ("ns3::TorApp::WindowIncrement", IntegerValue (50));
     Config::SetDefault ("Circuit::CongestionFlavor", StringValue(congFlavor));
     Config::SetDefault ("Circuit::BDPFlavor", StringValue(bdpFlavor));
-    Config::SetDefault ("Circuit::oldCongControl", IntegerValue(oldCongControl));
+    Config::SetDefault ("Circuit::oldCongControl", IntegerValue(oldCongControl)); // TODO BoolValue??!
 
     cout << "Set up topology\n";
     NS_LOG_INFO("setup topology");
@@ -120,8 +120,9 @@ int main (int argc, char *argv[]) {
             th.AddCircuit(n_circ_new,"entry5","btlnk","exit5", CreateObject<PseudoClientSocket> (m_bulkRequest, m_bulkThink, Seconds(m_startTime->GetValue ())) );
             n_circ_new++;
         }
-
-
+    // set attribute for relay with corresponding nemae (here: btlnk)
+    // TODO: evtl dass auch mal anpassen => zeitlang schneller möglich (durch burst) 
+    // evtl besser in interfaces begrenzen
     string bwRate = "6";
     string bwBurst = "8";
     th.SetRelayAttribute("btlnk", "BandwidthRate", DataRateValue(DataRate((bwRate + "Mb/s"))));
@@ -131,6 +132,11 @@ int main (int argc, char *argv[]) {
     th.BuildTopology(); // finally build topology, setup relays and seed circuits
     cout << "topology built\n";
 
+    /* limit the access link */
+    // TODO: vllt besser das ändern, Syntax evtl anders (lookup in 01-single-star-web/sim.cc)
+    // Ptr<Node> client = th.GetTorNode("btlnk");
+    // client->GetDevice(0)->GetObject<PointToPointNetDevice>()->SetDataRate(DataRate("1MB/s"));
+    // client->GetDevice(0)->GetChannel()->GetDevice(0)->GetObject<PointToPointNetDevice>()->SetDataRate(DataRate("1MB/s"));
 
     // change standard output to save output in csv file
     std::string filename = " ";
@@ -167,6 +173,8 @@ int main (int argc, char *argv[]) {
     NS_LOG_INFO("stop simulation");
     Simulator::Destroy ();
 
+    //cwndFile.close();
+    //logFile.close();
     std::cout.rdbuf(coutbuf); //reset to standard output again
 
     return 0;
