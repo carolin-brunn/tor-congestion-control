@@ -653,7 +653,8 @@ Circuit::Circuit (uint16_t circ_id, Ptr<Connection> n_conn, Ptr<Connection> p_co
    * NEW variables for NEW congestion control
    */
   this->m_inflight = 0;
-  this->m_pckCounter = 0;
+  this->m_pckCounter_sent = 0;
+  this->m_pckCounter_recv = 0;
   this->m_num_sendmes = 0;
   
   this->cc_sendme_inc = m_windowIncrement; // 25, 33, 50
@@ -754,6 +755,10 @@ Circuit::PopCell (CellDirection direction)
       if (!conn->SpeaksCells ())
         {
           deliver_window--;
+          m_pckCounter_recv++;
+          cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () << 
+                          "] RECEIVED cell. Deliver window now " << deliver_window << 
+                          " RECEIVED packet_counter: " << m_pckCounter_recv <<"\n";            
           if(oldCongControl)
             {
               // OLD CONGESTION CONTROL
@@ -801,27 +806,27 @@ Circuit::PushCell (Ptr<Packet> cell, CellDirection direction)
           if(oldCongControl)
             {
               package_window--;
-              m_pckCounter++; // NEW packet_counter to analyze traffic
+              m_pckCounter_sent++; // NEW packet_counter to analyze traffic
               if (package_window <= 0)
                 {
                   opp_conn->SetBlocked (true);
                 }
                 cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () << 
                           "] SENT cell. Package window now " << package_window << 
-                          " packet_counter: " << m_pckCounter <<"\n";            
+                          " SENT packet_counter: " << m_pckCounter_sent <<"\n";            
             }
           // NEW CONGESTION CONTROL
           else 
             {
-              m_pckCounter++;
+              m_pckCounter_sent++;
               m_inflight++;
 
               // get timestamp for every 50th packet => will be acknowledged with SENDME
-              if (m_pckCounter % 50 == 0)
+              if (m_pckCounter_sent % 50 == 0)
                 {
-                  sentPck_timestamps[m_pckCounter] = Simulator::Now();
+                  sentPck_timestamps[m_pckCounter_sent] = Simulator::Now();
                   NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-                            "Timestamp for Packet no.: " << m_pckCounter << " is: " << sentPck_timestamps[m_pckCounter] );
+                            "Timestamp for Packet no.: " << m_pckCounter_sent << " is: " << sentPck_timestamps[m_pckCounter_sent] );
                 }
               
               if ( (cwnd - m_inflight) <= 0 )
@@ -872,13 +877,13 @@ Circuit::PushCell (Ptr<Packet> cell, CellDirection direction)
                       NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
                                 "]" << "Currently used BDP: " << curr_bdp );
                       UpdateCwnd(curr_bdp, conn);
-                      cout << " packet_counter: " << m_pckCounter << "\n";
+                      cout << " SENT packet_counter: " << m_pckCounter_sent << "\n";
                     }
 
                   NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-                            "] Current cwnd: " << cwnd << " pck_counter: " << m_pckCounter << " inflight: " << m_inflight );
+                            "] Current cwnd: " << cwnd << " pck_counter: " << m_pckCounter_sent << " inflight: " << m_inflight );
                   //cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-                  //          "] Current cwnd: " << cwnd << " pck_counter: " << m_pckCounter << "\n";
+                  //          "] Current cwnd: " << cwnd << " pck_counter: " << m_pckCounter_sent << "\n";
                 }
               
               //cout << " got out of condition\n";
@@ -957,20 +962,20 @@ Circuit::CalculateRtt( Ptr<Connection> conn ) //map<uint16_t,Time> sent_time, ma
   m_raw_rtt.push_back(m_curr_rtt);
   
   // update min and max RTT (min only after certain number of rounds to allow smoothing)
-  if ( m_curr_rtt < m_min_rtt ) // && (int(m_ewma_rtt.size()) >= cc_ewma_cwnd_pct) )//( m_curr_rtt < m_min_rtt && int(m_pckCounter) >= cc_ewma_cwnd_pct)
+  if ( m_curr_rtt < m_min_rtt ) // && (int(m_ewma_rtt.size()) >= cc_ewma_cwnd_pct) )//( m_curr_rtt < m_min_rtt && int(m_pckCounter_sent) >= cc_ewma_cwnd_pct)
     {
       m_min_rtt = m_curr_rtt;
       NS_LOG_LOGIC (Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-                "NEW min RTT: "<< m_min_rtt << " pck no: " << m_pckCounter );
+                "NEW min RTT: "<< m_min_rtt << " pck no: " << m_pckCounter_sent );
       //cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-      //          "NEW min RTT: "<< m_min_rtt << " pck no: " << m_pckCounter << "\n";
+      //          "NEW min RTT: "<< m_min_rtt << " pck no: " << m_pckCounter_sent << "\n";
   
     }
   if( m_curr_rtt > m_max_rtt)
     {
       m_max_rtt = m_curr_rtt;
       //cout << Simulator::Now() << "[" << conn->GetTorApp()->GetNodeName() << ": Circuit " << GetId () <<
-      //          "NEW max RTT: "<< m_max_rtt << " pck no: " << m_pckCounter << "\n";
+      //          "NEW max RTT: "<< m_max_rtt << " pck no: " << m_pckCounter_sent << "\n";
   
     }
 
@@ -1000,7 +1005,7 @@ Circuit::CalculateRtt( Ptr<Connection> conn ) //map<uint16_t,Time> sent_time, ma
 double 
 Circuit::CalcEWMASmoothingBDP(int r, int n_iter)
 {
-  cout << "CALC BDP Smoothing\n";
+  //cout << "CALC BDP Smoothing\n";
   double N = cc_ewma_cwnd_pct;
   double tmp = 0.0;
   if(r < n_iter)

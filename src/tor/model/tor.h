@@ -167,7 +167,8 @@ protected:
   int cc_ewma_cwnd_pct; //NEW specifies percent of congestion windows worth of SENDME acks for smoothing
   int cc_ewma_max; // NEW max no of acks used for congestion window
   
-  uint64_t m_pckCounter; // NEW count how many packets have been sent in total
+  uint64_t m_pckCounter_sent; // NEW count how many packets have been sent in total
+  uint64_t m_pckCounter_recv; // NEW count how many packets have been received in total
   int m_inflight; // NEW count how many packets have not been acknowledged yet
   int m_num_sendmes; // NEW count how many sendmes have been received
   double m_num_sendme_timestamp_delta; // NEW add up the deltas between sendmes
